@@ -1,0 +1,196 @@
+name: MixCut v0.16.3 Runtime Log Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - chatgpt/mixcut-v0163-runtime-log-build
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Checkout temporary build branch
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          choco install innosetup -y --no-progress
+
+      - name: Download official MixCut Windows v0.16.3 source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          Invoke-WebRequest 'https://github.com/RoshanGH/mixcut-windows/archive/refs/tags/v0.16.3.zip' -OutFile mixcut-official.zip
+          Expand-Archive mixcut-official.zip -DestinationPath work
+          $src = Get-ChildItem work -Directory | Select-Object -First 1
+          Rename-Item $src.FullName MixCutSource
+          Write-Host "Official source: $((Resolve-Path work/MixCutSource).Path)"
+
+      - name: Apply ONLY top runtime-log patch
+        shell: powershell
+        run: |
+          python ci/apply_runtime_log_patch.py work/MixCutSource
+          if ($LASTEXITCODE -ne 0) { throw 'Patch failed' }
+
+      - name: Resolve and download official v0.16.3 installer
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $candidates = @(
+            'http://47.119.175.47/mixcut/versions.json',
+            'https://47.119.175.47/mixcut/versions.json'
+          )
+          $json = $null
+          foreach($u in $candidates) {
+            try { $json = Invoke-RestMethod $u -TimeoutSec 20; if($json){break} } catch { Write-Host "versions fail $u : $($_.Exception.Message)" }
+          }
+          if(-not $json) { throw 'Cannot fetch official versions.json' }
+          $json | ConvertTo-Json -Depth 10 | Out-File versions-debug.json -Encoding utf8
+          $urls = New-Object System.Collections.Generic.List[string]
+          function Walk($o) {
+            if($null -eq $o){return}
+            if($o -is [string]) {
+              if($o -match '^https?://' -and ($o -match 'win|windows|setup|exe|pan\.baidu|download')) { $urls.Add($o) }
+              return
+            }
+            if($o -is [System.Collections.IDictionary]) { foreach($k in $o.Keys){ Walk $o[$k] }; return }
+            if($o -is [System.Collections.IEnumerable]) { foreach($i in $o){ Walk $i }; return }
+            foreach($p in $o.PSObject.Properties){ Walk $p.Value }
+          }
+          Walk $json
+          $urls | Set-Content candidate-urls.txt
+          Write-Host 'Candidate URLs:'
+          $urls | ForEach-Object { Write-Host $_ }
+          $direct = $urls | Where-Object { $_ -match '\.exe($|\?)' } | Select-Object -First 1
+          if(-not $direct){ throw 'versions.json did not expose a direct Windows installer exe URL' }
+          Invoke-WebRequest $direct -OutFile official-setup.exe -MaximumRedirection 10
+          if((Get-Item official-setup.exe).Length -lt 10MB){ throw 'Official installer download is unexpectedly small' }
+
+      - name: Install official package into staging directory
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $stage = Join-Path $PWD 'official-installed'
+          New-Item -ItemType Directory $stage -Force | Out-Null
+          $p = Start-Process "$PWD\official-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$stage" -PassThru -Wait
+          if($p.ExitCode -ne 0){ throw "Official installer failed: $($p.ExitCode)" }
+          if(-not (Test-Path "$stage\MixCut.exe")){ throw 'Official MixCut.exe not found after install' }
+          Write-Host "Official installed size MB: $([math]::Round(((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum/1MB),2))"
+
+      - name: Build patched official WPF source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          dotnet publish work/MixCutSource/src/MixCut/MixCut.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:PublishReadyToRun=true -p:IncludeNativeLibrariesForSelfExtract=true -o patched-publish -nologo
+          if($LASTEXITCODE -ne 0){ throw 'dotnet publish failed' }
+          if(-not (Test-Path patched-publish/MixCut.exe)){ throw 'Patched MixCut.exe missing' }
+
+      - name: Overlay patched app code while preserving official dependencies
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $stage = Join-Path $PWD 'official-installed'
+          # Preserve the author's official bin directory/models/native executables unchanged.
+          # Replace only app/runtime files generated from the exact official v0.16.3 source plus runtime-log UI.
+          robocopy patched-publish $stage /E /XF *.pdb /XD bin | Out-Host
+          if($LASTEXITCODE -gt 7){ throw "robocopy failed: $LASTEXITCODE" }
+          if(-not (Test-Path "$stage\bin\ffmpeg.exe")){ throw 'Official ffmpeg missing after overlay' }
+          if(-not (Test-Path "$stage\bin\whisper-cli.exe")){ throw 'Official whisper-cli missing after overlay' }
+          if(-not (Test-Path "$stage\bin\demucs.exe")){ throw 'Official demucs missing after overlay' }
+
+      - name: Create installer script for exact staged official package
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          @'
+          #define MyAppName "MixCut"
+          #define MyAppVersion "0.16.3"
+          #define MyAppPublisher "MixCut"
+          #define MyAppURL "https://github.com/RoshanGH/mixcut-windows"
+          #define MyAppExeName "MixCut.exe"
+          [Setup]
+          AppId={{B7C8F2E0-5B3A-4D1A-9E4F-3C2A1B0E5D6F}
+          AppName={#MyAppName}
+          AppVersion={#MyAppVersion}
+          AppVerName={#MyAppName} {#MyAppVersion}
+          AppPublisher={#MyAppPublisher}
+          AppPublisherURL={#MyAppURL}
+          AppSupportURL={#MyAppURL}/issues
+          AppUpdatesURL={#MyAppURL}/releases
+          DefaultDirName={localappdata}\Programs\{#MyAppName}
+          DefaultGroupName={#MyAppName}
+          PrivilegesRequired=lowest
+          PrivilegesRequiredOverridesAllowed=dialog
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          MinVersion=10.0.17763
+          DisableProgramGroupPage=yes
+          DisableDirPage=no
+          UninstallDisplayIcon={app}\{#MyAppExeName}
+          UninstallDisplayName={#MyAppName} {#MyAppVersion}
+          WizardStyle=modern
+          Compression=lzma2/max
+          SolidCompression=yes
+          OutputDir=out
+          OutputBaseFilename=安装_MixCut_Windows_v0.16.3_顶部详细运行日志增强版
+          DiskSpanning=no
+          ShowLanguageDialog=no
+          SetupLogging=yes
+          [Languages]
+          Name: "english"; MessagesFile: "compiler:Default.isl"
+          [Tasks]
+          Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "其它任务:"; Flags: unchecked
+          [Files]
+          Source: "official-installed\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+          [Icons]
+          Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+          Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
+          Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+          [Run]
+          Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+          '@ | Out-File build.iss -Encoding utf8
+          New-Item -ItemType Directory out -Force | Out-Null
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' build.iss
+          if($LASTEXITCODE -ne 0){ throw 'Inno Setup build failed' }
+
+      - name: Create complete source ZIP
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          Copy-Item ci/apply_runtime_log_patch.py work/MixCutSource/APPLIED_RUNTIME_LOG_PATCH_SCRIPT.py
+          @'
+          基线：RoshanGH/mixcut-windows v0.16.3
+          commit：03682083da22207802f9de82c3e11e34c4c5bce6
+          本版只增加顶部“运行日志”入口和 RuntimeLogWindow，不修改其它原界面、业务逻辑、数据库、AI Prompt 或参数。
+          '@ | Out-File work/MixCutSource/本版说明.txt -Encoding utf8
+          Compress-Archive -Path work/MixCutSource/* -DestinationPath MixCut_Windows_v0.16.3_顶部详细运行日志增强版_完整源码.zip -CompressionLevel Optimal
+
+      - name: Produce hashes
+        shell: powershell
+        run: |
+          $installer = Get-ChildItem out -Filter '*.exe' | Select-Object -First 1
+          $source = Get-Item MixCut_Windows_v0.16.3_顶部详细运行日志增强版_完整源码.zip
+          $lines = @(
+            "$( (Get-FileHash $installer.FullName -Algorithm SHA256).Hash )  $($installer.Name)",
+            "$( (Get-FileHash $source.FullName -Algorithm SHA256).Hash )  $($source.Name)"
+          )
+          $lines | Set-Content MixCut_Windows_v0.16.3_SHA256SUMS.txt
+
+      - name: Upload deliverables
+        uses: actions/upload-artifact@v4
+        with:
+          name: MixCut-Windows-v0.16.3-runtime-log-deliverables
+          path: |
+            out/*.exe
+            MixCut_Windows_v0.16.3_顶部详细运行日志增强版_完整源码.zip
+            MixCut_Windows_v0.16.3_SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
