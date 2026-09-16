@@ -8,7 +8,7 @@ on:
       - '.github/workflows/fund-v130-windows-build.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PAYLOAD_BRANCH: tmp-fund-v130-build-20260917
@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Generate ephemeral transport key
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $private = Join-Path $env:RUNNER_TEMP 'fund-private.pem'
           $public = Join-Path $env:RUNNER_TEMP 'fund-public.pem'
@@ -28,7 +30,17 @@ jobs:
           openssl pkey -in $private -pubout -out $public
           if ($LASTEXITCODE -ne 0) { throw 'RSA public-key export failed' }
           $pub64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($public))
-          Write-Host "FUND_PUBLIC_KEY_B64=$pub64"
+          $body = @{ message = 'ci: publish ephemeral build public key'; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pub64)); branch = $env:PAYLOAD_BRANCH } | ConvertTo-Json
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v130-builder' }
+          $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/.fund-build/public.pem.b64"
+          try {
+            Invoke-RestMethod -Headers $headers -Uri $url -Method Put -Body $body -ContentType 'application/json' | Out-Null
+          } catch {
+            $existing = Invoke-RestMethod -Headers $headers -Uri "$url?ref=$env:PAYLOAD_BRANCH" -Method Get
+            $body = @{ message = 'ci: refresh ephemeral build public key'; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pub64)); branch = $env:PAYLOAD_BRANCH; sha = $existing.sha } | ConvertTo-Json
+            Invoke-RestMethod -Headers $headers -Uri $url -Method Put -Body $body -ContentType 'application/json' | Out-Null
+          }
+          Write-Host 'Ephemeral public key published.'
 
       - name: Wait for encrypted source payload
         shell: pwsh
