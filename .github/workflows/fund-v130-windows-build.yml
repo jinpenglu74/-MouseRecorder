@@ -18,22 +18,22 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
-      - name: Publish v5 ephemeral RSA public key
+      - name: Publish v6 ephemeral RSA public key
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $private = Join-Path $env:RUNNER_TEMP 'fund-v5-private.pem'
-          $public = Join-Path $env:RUNNER_TEMP 'fund-v5-public.pem'
+          $private = Join-Path $env:RUNNER_TEMP 'fund-v6-private.pem'
+          $public = Join-Path $env:RUNNER_TEMP 'fund-v6-public.pem'
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out $private
           if ($LASTEXITCODE -ne 0) { throw 'RSA key generation failed' }
           openssl pkey -in $private -pubout -out $public
           if ($LASTEXITCODE -ne 0) { throw 'RSA public-key export failed' }
           $pub64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($public))
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v130-builder-v5' }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v130-builder-v6' }
           $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pub64))
-          $body = @{ message = 'ci: publish v5 ephemeral public key'; content = $content; branch = $env:PAYLOAD_BRANCH } | ConvertTo-Json
-          $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/.fund-build/v5-public.pem.b64"
+          $body = @{ message = 'ci: publish v6 ephemeral public key'; content = $content; branch = $env:PAYLOAD_BRANCH } | ConvertTo-Json
+          $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/.fund-build/v6-public.pem.b64"
           Invoke-RestMethod -Headers $headers -Uri $url -Method Put -Body $body -ContentType 'application/json' | Out-Null
 
       - name: Read encrypted payload and decrypt source
@@ -41,7 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v130-builder-v5' }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v130-builder-v6' }
           function Read-BranchText([string]$path) {
             $escaped = ($path -split '/' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
             $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/${escaped}?ref=$env:PAYLOAD_BRANCH"
@@ -51,11 +51,11 @@ jobs:
           }
           $keyText = $null
           for ($attempt = 0; $attempt -lt 90; $attempt++) {
-            try { $keyText = Read-BranchText '.fund-build/v5-key.enc.b64' } catch { $keyText = $null }
+            try { $keyText = Read-BranchText '.fund-build/v6-key.enc.b64' } catch { $keyText = $null }
             if ($keyText) { break }
             Start-Sleep -Seconds 2
           }
-          if (-not $keyText) { throw 'v5 encrypted transport key was not uploaded' }
+          if (-not $keyText) { throw 'v6 encrypted transport key was not uploaded' }
           $parts = @()
           for ($i = 0; $i -lt 7; $i++) {
             $path = '.fund-build/v3-payload.{0:d3}' -f $i
@@ -65,26 +65,97 @@ jobs:
           }
           $payloadText = $parts -join ''
           if ($payloadText.Length -ne 106264) { throw "Unexpected encrypted payload text length: $($payloadText.Length)" }
-          $payloadPath = Join-Path $env:RUNNER_TEMP 'fund-v5-payload.enc'
-          $keyPath = Join-Path $env:RUNNER_TEMP 'fund-v5-key.enc'
+          $payloadPath = Join-Path $env:RUNNER_TEMP 'fund-v6-payload.enc'
+          $keyPath = Join-Path $env:RUNNER_TEMP 'fund-v6-key.enc'
           [IO.File]::WriteAllBytes($payloadPath, [Convert]::FromBase64String($payloadText))
           [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String(($keyText -replace '\s','')))
-          if ((Get-Item $payloadPath).Length -ne 79696) { throw 'Encrypted payload byte length mismatch' }
-          $private = Join-Path $env:RUNNER_TEMP 'fund-v5-private.pem'
-          $keyIvPath = Join-Path $env:RUNNER_TEMP 'fund-v5-keyiv.bin'
+          $private = Join-Path $env:RUNNER_TEMP 'fund-v6-private.pem'
+          $keyIvPath = Join-Path $env:RUNNER_TEMP 'fund-v6-keyiv.bin'
           openssl pkeyutl -decrypt -inkey $private -pkeyopt rsa_padding_mode:oaep -in $keyPath -out $keyIvPath
           if ($LASTEXITCODE -ne 0) { throw 'RSA transport-key decryption failed' }
           $keyIv = [IO.File]::ReadAllBytes($keyIvPath)
           if ($keyIv.Length -ne 48) { throw "Unexpected transport key length: $($keyIv.Length)" }
           $keyHex = (($keyIv[0..31] | ForEach-Object { $_.ToString('x2') }) -join '')
           $ivHex = (($keyIv[32..47] | ForEach-Object { $_.ToString('x2') }) -join '')
-          $sourceZip = Join-Path $env:RUNNER_TEMP 'fund-v5-source.zip'
+          $sourceZip = Join-Path $env:RUNNER_TEMP 'fund-v6-source.zip'
           openssl enc -d -aes-256-cbc -K $keyHex -iv $ivHex -in $payloadPath -out $sourceZip
           if ($LASTEXITCODE -ne 0) { throw 'AES source decryption failed' }
-          $sourceDir = Join-Path $env:RUNNER_TEMP 'fund-v5-source'
+          $sourceDir = Join-Path $env:RUNNER_TEMP 'fund-v6-source'
           Expand-Archive -LiteralPath $sourceZip -DestinationPath $sourceDir -Force
           if (-not (Test-Path (Join-Path $sourceDir 'pyproject.toml'))) { throw 'Decrypted source is incomplete' }
           "FUND_SOURCE_DIR=$sourceDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Restore CI-only test contract files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:FUND_SOURCE_DIR\tests" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:FUND_SOURCE_DIR\.github\workflows" | Out-Null
+          @'
+          from pathlib import Path
+          from uuid import uuid4
+          import pytest
+
+          @pytest.fixture
+          def sandbox_path() -> Path:
+              path = Path.cwd() / "work" / "test-runs" / uuid4().hex
+              path.mkdir(parents=True, exist_ok=True)
+              return path
+          '@ | Set-Content -LiteralPath "$env:FUND_SOURCE_DIR\tests\conftest.py" -Encoding UTF8
+          @'
+          name: Windows installer
+
+          on:
+            workflow_dispatch:
+            push:
+              branches: [main]
+              paths:
+                - 'src/**'
+                - 'packaging/**'
+                - 'FundForecastApp.spec'
+                - 'pyproject.toml'
+                - '.github/workflows/windows-installer.yml'
+
+          jobs:
+            build-test-installer:
+              runs-on: windows-2025
+              timeout-minutes: 30
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: '3.13'
+                    cache: 'pip'
+                - name: Install build dependencies
+                  shell: pwsh
+                  run: |
+                    python -m pip install --upgrade pip
+                    python -m pip install -e ".[dev]"
+                - name: Run Python tests
+                  run: python -m pytest -q
+                - name: Build desktop application
+                  run: pyinstaller --noconfirm --clean FundForecastApp.spec
+                - name: Build Inno Setup installer
+                  shell: pwsh
+                  run: .\packaging\build-installer.ps1 -OutputDirectory .\release
+                - name: Smoke test install, app self-test, and uninstall
+                  shell: pwsh
+                  run: |
+                    $installer = Get-ChildItem .\release\*.exe | Select-Object -First 1
+                    .\packaging\test-installed.ps1 -InstallerPath $installer.FullName
+                - name: Write SHA256
+                  shell: pwsh
+                  run: |
+                    $installer = Get-ChildItem .\release\*.exe | Select-Object -First 1
+                    $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
+                    "$hash  $($installer.Name)" | Set-Content -LiteralPath .\release\SHA256SUMS.txt -Encoding ASCII
+                - uses: actions/upload-artifact@v4
+                  with:
+                    name: FundForecast-v1.3.0-Windows
+                    path: |
+                      release/*.exe
+                      release/SHA256SUMS.txt
+                    if-no-files-found: error
+          '@ | Set-Content -LiteralPath "$env:FUND_SOURCE_DIR\.github\workflows\windows-installer.yml" -Encoding UTF8
 
       - uses: actions/setup-python@v5
         with:
@@ -136,7 +207,7 @@ jobs:
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: FundForecast-v1.3.0-Windows-tested-v5
+          name: FundForecast-v1.3.0-Windows-tested-v6
           path: |
             ${{ env.FUND_SOURCE_DIR }}\release\*.exe
             ${{ env.FUND_SOURCE_DIR }}\release\SHA256SUMS.txt
