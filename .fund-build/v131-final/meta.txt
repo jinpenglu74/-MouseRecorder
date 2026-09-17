@@ -1,0 +1,7 @@
+archive_sha256=4dcef3f5738e94f503e9f435cf381bc7c02c59fad5d37435b66b6b888c6efe64
+cipher_sha256=fd7a2761cfcfa89e7a806217fba2b3796409a8e7dda70ac92d8fa000a0e76ec2
+b64_length=81516
+pieces=8
+order=pack.000,pack.001,pack.002a,pack.002b,pack.003a,pack.003b,pack.004a,pack.004b
+archive=tar.xz
+version=1.3.1
