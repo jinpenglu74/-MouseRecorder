@@ -43,7 +43,7 @@ jobs:
           $body = $bodyMap | ConvertTo-Json
           Invoke-RestMethod -Headers $headers -Uri $url -Method Put -Body $body -ContentType 'application/json' | Out-Null
 
-      - name: Read verified encrypted payload and decrypt source
+      - name: Read verified encrypted payload apply final overlay and decrypt source
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,53 +98,25 @@ jobs:
           tar -xf $archive -C $sourceDir
           if ($LASTEXITCODE -ne 0) { throw 'Source archive extraction failed' }
           if (-not (Test-Path (Join-Path $sourceDir 'pyproject.toml'))) { throw 'Decrypted source is incomplete' }
+
+          $overlayText = Read-BranchText '.fund-build/v132/overlay.enc.b64'
+          $overlayPath = Join-Path $env:RUNNER_TEMP 'fund-v132-overlay.enc'
+          [IO.File]::WriteAllBytes($overlayPath, [Convert]::FromBase64String(($overlayText -replace '\s','')))
+          $overlayCipherHash = (Get-FileHash -Algorithm SHA256 $overlayPath).Hash.ToLowerInvariant()
+          if ($overlayCipherHash -ne 'a8ed7030d324b3aedacb7b6d24352e93e81b176097eb60b8707e746f23f02a6d') { throw "Overlay cipher SHA256 mismatch: $overlayCipherHash" }
+          $overlayArchive = Join-Path $env:RUNNER_TEMP 'fund-v132-overlay.tar.xz'
+          openssl enc -d -aes-256-cbc -K $keyHex -iv $ivHex -in $overlayPath -out $overlayArchive
+          if ($LASTEXITCODE -ne 0) { throw 'AES overlay decryption failed' }
+          $overlayArchiveHash = (Get-FileHash -Algorithm SHA256 $overlayArchive).Hash.ToLowerInvariant()
+          if ($overlayArchiveHash -ne 'd5c32a27f7cbd143586f23aad78a8d8cc797df2c8b4cb3ba07ae3729ad16ed3a') { throw "Overlay archive SHA256 mismatch: $overlayArchiveHash" }
+          tar -xf $overlayArchive -C $sourceDir
+          if ($LASTEXITCODE -ne 0) { throw 'Final source overlay extraction failed' }
+
           "FUND_SOURCE_DIR=$sourceDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-
-      - name: Apply v1.3.2 isolated shortcut collision fix
-        shell: pwsh
-        working-directory: ${{ env.FUND_SOURCE_DIR }}
-        run: |
-          @'
-          from pathlib import Path
-          path = Path("packaging/install.ps1")
-          text = path.read_text(encoding="utf-8")
-          old = '''    $desktopLink = $shell.CreateShortcut((Join-Path $desktop "基金预测.lnk"))
-              $desktopLink.TargetPath = $exe
-              $desktopLink.WorkingDirectory = $installDir
-              $desktopLink.Description = "基金预测"
-              $desktopLink.Save()
-
-              $startLink = $shell.CreateShortcut((Join-Path $programs "基金预测.lnk"))
-              $startLink.TargetPath = $exe
-              $startLink.WorkingDirectory = $installDir
-              $startLink.Description = "基金预测"
-              $startLink.Save()
-          '''
-          new = '''    $desktopLinkPath = Join-Path $desktop "基金预测.lnk"
-              $startLinkPath = Join-Path $programs "基金预测.lnk"
-
-              $desktopLink = $shell.CreateShortcut($desktopLinkPath)
-              $desktopLink.TargetPath = $exe
-              $desktopLink.WorkingDirectory = $installDir
-              $desktopLink.Description = "基金预测"
-              $desktopLink.Save()
-
-              if ($startLinkPath -ne $desktopLinkPath) {
-                  $startLink = $shell.CreateShortcut($startLinkPath)
-                  $startLink.TargetPath = $exe
-                  $startLink.WorkingDirectory = $installDir
-                  $startLink.Description = "基金预测"
-                  $startLink.Save()
-              }
-          '''
-          if old not in text:
-              raise SystemExit("isolated shortcut patch target not found")
-          path.write_text(text.replace(old, new), encoding="utf-8")
-          '@ | python -
 
       - name: Install project and build dependencies
         shell: pwsh
