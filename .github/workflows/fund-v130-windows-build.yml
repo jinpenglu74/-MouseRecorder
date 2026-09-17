@@ -1,4 +1,4 @@
-name: Fund v1.3.1 encrypted Windows build
+name: Fund v1.3.2 full Windows validation
 
 on:
   push:
@@ -9,31 +9,33 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 env:
-  PAYLOAD_BRANCH: tmp-fund-v131-once-20260917
+  PAYLOAD_BRANCH: tmp-fund-v132-once-20260917
+  OLD_ARTIFACT_ID: '10481642885'
 
 jobs:
   build-test-installer:
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - name: Publish v1.3.1 ephemeral RSA public key
+      - name: Publish v1.3.2 ephemeral RSA public key
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $private = Join-Path $env:RUNNER_TEMP 'fund-v131-private.pem'
-          $public = Join-Path $env:RUNNER_TEMP 'fund-v131-public.pem'
+          $private = Join-Path $env:RUNNER_TEMP 'fund-v132-private.pem'
+          $public = Join-Path $env:RUNNER_TEMP 'fund-v132-public.pem'
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out $private
           if ($LASTEXITCODE -ne 0) { throw 'RSA key generation failed' }
           openssl pkey -in $private -pubout -out $public
           if ($LASTEXITCODE -ne 0) { throw 'RSA public-key export failed' }
           $pub64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($public))
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v131-builder' }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v132-builder' }
           $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pub64))
-          $bodyMap = @{ message = 'ci: publish v1.3.1 ephemeral public key'; content = $content; branch = $env:PAYLOAD_BRANCH }
-          $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/.fund-build/v131-final/public.pem.b64"
+          $bodyMap = @{ message = 'ci: publish v1.3.2 ephemeral public key'; content = $content; branch = $env:PAYLOAD_BRANCH }
+          $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/.fund-build/v132/public.pem.b64"
           try {
             $existing = Invoke-RestMethod -Headers $headers -Uri ($url + "?ref=$env:PAYLOAD_BRANCH") -Method Get
             if ($existing.sha) { $bodyMap.sha = $existing.sha }
@@ -46,7 +48,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v131-builder' }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v132-builder' }
           function Read-BranchText([string]$path) {
             $escaped = ($path -split '/' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
             $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/${escaped}?ref=$env:PAYLOAD_BRANCH"
@@ -56,37 +58,28 @@ jobs:
           }
 
           $keyText = $null
-          for ($attempt = 0; $attempt -lt 90; $attempt++) {
-            try { $keyText = Read-BranchText '.fund-build/v131-final/key.enc.b64' } catch { $keyText = $null }
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            try { $keyText = Read-BranchText '.fund-build/v132/key.enc.b64' } catch { $keyText = $null }
             if ($keyText) { break }
             Start-Sleep -Seconds 2
           }
-          if (-not $keyText) { throw 'Encrypted v1.3.1 transport key was not uploaded' }
+          if (-not $keyText) { throw 'Encrypted v1.3.2 transport key was not uploaded' }
 
-          $paths = @(
-            '.fund-build/v131-final/pack.000',
-            '.fund-build/v131-final/pack.001',
-            '.fund-build/v131-final/pack.002a',
-            '.fund-build/v131-final/pack.002b',
-            '.fund-build/v131-final/pack.003a',
-            '.fund-build/v131-final/pack.003b',
-            '.fund-build/v131-final/pack.004a',
-            '.fund-build/v131-final/pack.004b'
-          )
+          $paths = 0..17 | ForEach-Object { '.fund-build/v132/pack.{0:D2}' -f $_ }
           $parts = foreach ($path in $paths) { Read-BranchText $path }
           $payloadText = $parts -join ''
-          if ($payloadText.Length -ne 81516) { throw "Unexpected encrypted payload text length: $($payloadText.Length)" }
+          if ($payloadText.Length -ne 130476) { throw "Unexpected encrypted payload text length: $($payloadText.Length)" }
 
-          $payloadPath = Join-Path $env:RUNNER_TEMP 'fund-v131-source.enc'
-          $keyPath = Join-Path $env:RUNNER_TEMP 'fund-v131-key.enc'
+          $payloadPath = Join-Path $env:RUNNER_TEMP 'fund-v132-source.enc'
+          $keyPath = Join-Path $env:RUNNER_TEMP 'fund-v132-key.enc'
           [IO.File]::WriteAllBytes($payloadPath, [Convert]::FromBase64String($payloadText))
           [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String(($keyText -replace '\s','')))
 
           $cipherHash = (Get-FileHash -Algorithm SHA256 $payloadPath).Hash.ToLowerInvariant()
-          if ($cipherHash -ne 'fd7a2761cfcfa89e7a806217fba2b3796409a8e7dda70ac92d8fa000a0e76ec2') { throw "Cipher SHA256 mismatch: $cipherHash" }
+          if ($cipherHash -ne 'd7d6a40515febe648727f3816ea98fe02b5dc7f6ef3fd21b36c5eb76ba246558') { throw "Cipher SHA256 mismatch: $cipherHash" }
 
-          $private = Join-Path $env:RUNNER_TEMP 'fund-v131-private.pem'
-          $keyIvPath = Join-Path $env:RUNNER_TEMP 'fund-v131-keyiv.bin'
+          $private = Join-Path $env:RUNNER_TEMP 'fund-v132-private.pem'
+          $keyIvPath = Join-Path $env:RUNNER_TEMP 'fund-v132-keyiv.bin'
           openssl pkeyutl -decrypt -inkey $private -pkeyopt rsa_padding_mode:oaep -in $keyPath -out $keyIvPath
           if ($LASTEXITCODE -ne 0) { throw 'RSA transport-key decryption failed' }
           $keyIv = [IO.File]::ReadAllBytes($keyIvPath)
@@ -94,46 +87,18 @@ jobs:
           $keyHex = (($keyIv[0..31] | ForEach-Object { $_.ToString('x2') }) -join '')
           $ivHex = (($keyIv[32..47] | ForEach-Object { $_.ToString('x2') }) -join '')
 
-          $archive = Join-Path $env:RUNNER_TEMP 'fund-v131-source.tar.xz'
+          $archive = Join-Path $env:RUNNER_TEMP 'fund-v132-source.tar.xz'
           openssl enc -d -aes-256-cbc -K $keyHex -iv $ivHex -in $payloadPath -out $archive
           if ($LASTEXITCODE -ne 0) { throw 'AES source decryption failed' }
           $archiveHash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($archiveHash -ne '4dcef3f5738e94f503e9f435cf381bc7c02c59fad5d37435b66b6b888c6efe64') { throw "Archive SHA256 mismatch: $archiveHash" }
+          if ($archiveHash -ne '9bbd2914c461b6023590c861fe05002dd81816b3e7a512f1963182768897fc05') { throw "Archive SHA256 mismatch: $archiveHash" }
 
-          $sourceDir = Join-Path $env:RUNNER_TEMP 'fund-v131-source'
+          $sourceDir = Join-Path $env:RUNNER_TEMP 'fund-v132-source'
           New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
           tar -xf $archive -C $sourceDir
           if ($LASTEXITCODE -ne 0) { throw 'Source archive extraction failed' }
           if (-not (Test-Path (Join-Path $sourceDir 'pyproject.toml'))) { throw 'Decrypted source is incomplete' }
           "FUND_SOURCE_DIR=$sourceDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Restore Windows runtime probe omitted from minimized transport payload
-        shell: pwsh
-        run: |
-          @'
-          function Test-WebView2Runtime {
-              param(
-                  [string[]]$RegistryPaths = @(
-                      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
-                      'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
-                      'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-                  )
-              )
-
-              foreach ($registryPath in $RegistryPaths) {
-                  try {
-                      $runtimeVersion = Get-ItemPropertyValue -LiteralPath $registryPath -Name 'pv' -ErrorAction Stop
-                      if ($runtimeVersion -and ([version]$runtimeVersion -gt [version]'0.0.0.0')) {
-                          return $true
-                      }
-                  }
-                  catch {
-                      continue
-                  }
-              }
-              return $false
-          }
-          '@ | Set-Content -LiteralPath "$env:FUND_SOURCE_DIR\packaging\check-runtime.ps1" -Encoding UTF8
 
       - uses: actions/setup-python@v5
         with:
@@ -146,27 +111,58 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Run Windows packaging launcher and runtime-log tests
+      - name: Run full Windows Python suite
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
-        run: python -m pytest -q tests/unit/test_packaging.py tests/unit/test_launcher.py tests/unit/test_launcher_self_test.py tests/unit/test_runtime_log.py
+        run: python -m pytest -q
 
-      - name: Run frontend tests
+      - name: Run frontend suite
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
         run: node --test tests/frontend/*.test.mjs
+
+      - name: Run syntax checks
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          python -m compileall -q src tests
+          node --check src/fund_platform/static/app.js
+          node --check src/fund_platform/static/api.js
+          node --check src/fund_platform/static/chart.js
 
       - name: Build PyInstaller desktop payload
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
         run: pyinstaller --noconfirm --clean FundForecastApp.spec
 
-      - name: Build Inno Setup installer
+      - name: Build v1.3.2 Inno Setup installer
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
         run: .\packaging\build-installer.ps1 -OutputDirectory .\release
 
-      - name: Silent install packaged self-test and uninstall
+      - name: Download tested v1.3.1 installer artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v132-builder' }
+          $zip = Join-Path $env:RUNNER_TEMP 'v131-artifact.zip'
+          $oldDir = Join-Path $env:RUNNER_TEMP 'v131-artifact'
+          Invoke-WebRequest -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:OLD_ARTIFACT_ID/zip" -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $oldDir -Force
+          $oldInstaller = Get-ChildItem -Path $oldDir -Recurse -Filter '*.exe' | Select-Object -First 1
+          if (-not $oldInstaller) { throw 'v1.3.1 tested installer missing from artifact' }
+          "OLD_INSTALLER=$($oldInstaller.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate real v1.3.1 to v1.3.2 upgrade and data retention
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          $newInstaller = Get-ChildItem .\release\*.exe | Select-Object -First 1
+          if (-not $newInstaller) { throw 'v1.3.2 installer not produced' }
+          .\packaging\test-upgrade-installed.ps1 -OldInstallerPath $env:OLD_INSTALLER -NewInstallerPath $newInstaller.FullName
+
+      - name: Validate clean install self-test and uninstall
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
         run: |
@@ -174,20 +170,27 @@ jobs:
           if (-not $installer) { throw 'Installer not produced' }
           .\packaging\test-installed.ps1 -InstallerPath $installer.FullName
 
-      - name: Write SHA256
+      - name: Write SHA256 and validation marker
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
         run: |
           $installer = Get-ChildItem .\release\*.exe | Select-Object -First 1
           $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
           "$hash  $($installer.Name)" | Set-Content -LiteralPath .\release\SHA256SUMS.txt -Encoding ASCII
+          @(
+            'WINDOWS_FULL_SUITE_OK',
+            'WINDOWS_UPGRADE_SMOKE_OK',
+            'WINDOWS_INSTALL_SMOKE_OK',
+            "installer_sha256=$hash"
+          ) | Set-Content -LiteralPath .\release\VALIDATION.txt -Encoding UTF8
 
-      - name: Upload tested Windows installer
+      - name: Upload tested v1.3.2 Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: FundForecast-v1.3.1-Windows-tested
+          name: FundForecast-v1.3.2-Windows-tested
           path: |
             ${{ env.FUND_SOURCE_DIR }}\release\*.exe
             ${{ env.FUND_SOURCE_DIR }}\release\SHA256SUMS.txt
+            ${{ env.FUND_SOURCE_DIR }}\release\VALIDATION.txt
           if-no-files-found: error
           retention-days: 1
