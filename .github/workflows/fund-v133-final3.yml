@@ -1,0 +1,244 @@
+name: Fund v1.3.3 final3 Windows validation
+
+on:
+  push:
+    branches:
+      - tmp-fund-v130-build-20260917
+    paths:
+      - '.github/workflows/fund-v133-final3.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  PAYLOAD_BRANCH: tmp-fund-v132-once-20260917
+  OLD_ARTIFACT_ID: '10500509493'
+
+jobs:
+  build-test-installer:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Publish v1.3.3-final3 ephemeral RSA public key
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $private = Join-Path $env:RUNNER_TEMP 'fund-v133-final3-private.pem'
+          $public = Join-Path $env:RUNNER_TEMP 'fund-v133-final3-public.pem'
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out $private
+          if ($LASTEXITCODE -ne 0) { throw 'RSA key generation failed' }
+          openssl pkey -in $private -pubout -out $public
+          if ($LASTEXITCODE -ne 0) { throw 'RSA public-key export failed' }
+          $pub64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($public))
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v133-final3-builder' }
+          $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pub64))
+          $url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/.fund-build/v133final3/public.pem.b64"
+          $bodyMap = @{ message='ci: publish v1.3.3 final3 public key'; content=$content; branch=$env:PAYLOAD_BRANCH }
+          try {
+            $existing = Invoke-RestMethod -Headers $headers -Uri ($url + "?ref=$env:PAYLOAD_BRANCH") -Method Get
+            if ($existing.sha) { $bodyMap.sha = $existing.sha }
+          } catch { }
+          Invoke-RestMethod -Headers $headers -Uri $url -Method Put -Body ($bodyMap | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+
+      - name: Decrypt verified source payload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v133-final3-builder' }
+          function Read-BranchText([string]$path) {
+            $escaped = ($path -split '/' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+            $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/${escaped}?ref=$env:PAYLOAD_BRANCH"
+            $item = Invoke-RestMethod -Headers $headers -Uri $uri -Method Get
+            $outer = ($item.content -replace '\s','')
+            return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($outer))
+          }
+          $keyText = $null
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            try { $keyText = Read-BranchText '.fund-build/v133final3/key.enc.b64' } catch { $keyText = $null }
+            if ($keyText) { break }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $keyText) { throw 'Encrypted v1.3.3 final transport key missing' }
+          $keyCipher = Join-Path $env:RUNNER_TEMP 'key.enc'
+          [IO.File]::WriteAllBytes($keyCipher, [Convert]::FromBase64String(($keyText -replace '\s','')))
+          $keyIvPath = Join-Path $env:RUNNER_TEMP 'keyiv.bin'
+          openssl pkeyutl -decrypt -inkey (Join-Path $env:RUNNER_TEMP 'fund-v133-final3-private.pem') -pkeyopt rsa_padding_mode:oaep -in $keyCipher -out $keyIvPath
+          if ($LASTEXITCODE -ne 0) { throw 'RSA transport-key decryption failed' }
+          $keyIv = [IO.File]::ReadAllBytes($keyIvPath)
+          if ($keyIv.Length -ne 48) { throw "Unexpected transport key length: $($keyIv.Length)" }
+          $keyHex = (($keyIv[0..31] | ForEach-Object { $_.ToString('x2') }) -join '')
+          $ivHex = (($keyIv[32..47] | ForEach-Object { $_.ToString('x2') }) -join '')
+
+          $baseText = ((0..17 | ForEach-Object { Read-BranchText ('.fund-build/v132/pack.{0:D2}' -f $_) }) -join '')
+          if ($baseText.Length -ne 130476) { throw "Bad base payload length: $($baseText.Length)" }
+          $baseCipher = Join-Path $env:RUNNER_TEMP 'base.enc'
+          [IO.File]::WriteAllBytes($baseCipher, [Convert]::FromBase64String($baseText))
+          if ((Get-FileHash $baseCipher -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'd7d6a40515febe648727f3816ea98fe02b5dc7f6ef3fd21b36c5eb76ba246558') { throw 'Base cipher SHA mismatch' }
+          $baseArchive = Join-Path $env:RUNNER_TEMP 'base.tar.xz'
+          openssl enc -d -aes-256-cbc -K $keyHex -iv $ivHex -in $baseCipher -out $baseArchive
+          if ($LASTEXITCODE -ne 0) { throw 'Base AES decrypt failed' }
+          if ((Get-FileHash $baseArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9bbd2914c461b6023590c861fe05002dd81816b3e7a512f1963182768897fc05') { throw 'Base archive SHA mismatch' }
+          $sourceDir = Join-Path $env:RUNNER_TEMP 'fund-v133-final3-source'
+          New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
+          tar -xf $baseArchive -C $sourceDir
+          if ($LASTEXITCODE -ne 0) { throw 'Base extraction failed' }
+
+          foreach ($overlay in @(
+            @{ path='.fund-build/v132/overlay.enc.b64'; cipher='a8ed7030d324b3aedacb7b6d24352e93e81b176097eb60b8707e746f23f02a6d'; archive='d5c32a27f7cbd143586f23aad78a8d8cc797df2c8b4cb3ba07ae3729ad16ed3a' },
+            @{ path='v133'; cipher='5d7f58924948bf88dbf2e2c949744ca815fc77c64209b64e91d89ec82941eb39'; archive='7ac63a38b81812332d2b0ae498129959da7ea7e5e7f9b9906a156415c4d5ffb9' }
+          )) {
+            if ($overlay.path -eq 'v133') {
+              $text = ((0..4 | ForEach-Object { Read-BranchText ('.fund-build/v133/overlay.{0:D2}' -f $_) }) -join '')
+              if ($text.Length -ne 31724) { throw 'Bad v1.3.3 overlay length' }
+            } else { $text = Read-BranchText $overlay.path }
+            $cipher = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
+            $archive = "$cipher.tar.xz"
+            [IO.File]::WriteAllBytes($cipher, [Convert]::FromBase64String(($text -replace '\s','')))
+            if ((Get-FileHash $cipher -Algorithm SHA256).Hash.ToLowerInvariant() -ne $overlay.cipher) { throw 'Overlay cipher SHA mismatch' }
+            openssl enc -d -aes-256-cbc -K $keyHex -iv $ivHex -in $cipher -out $archive
+            if ($LASTEXITCODE -ne 0) { throw 'Overlay AES decrypt failed' }
+            if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $overlay.archive) { throw 'Overlay archive SHA mismatch' }
+            tar -xf $archive -C $sourceDir
+            if ($LASTEXITCODE -ne 0) { throw 'Overlay extraction failed' }
+          }
+          "FUND_SOURCE_DIR=$sourceDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Apply verified lint-normalization patch
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          @'
+          from pathlib import Path
+          root = Path('.')
+          def rw(path, old, new):
+              p = root / path
+              s = p.read_text(encoding='utf-8')
+              if old not in s:
+                  raise SystemExit(f'expected pattern missing: {path}')
+              p.write_text(s.replace(old, new), encoding='utf-8', newline='\n')
+          rw('src/fund_platform/api/routes_core.py', 'import httpx\n\nfrom fastapi', 'import httpx\nfrom fastapi')
+          rw('src/fund_platform/logging_runtime.py', "        with self._lock:\n            with self.path.open('a', encoding='utf-8') as stream:\n                stream.write(line)\n", "        with self._lock, self.path.open('a', encoding='utf-8') as stream:\n            stream.write(line)\n")
+          p=root/'src/fund_platform/main.py'; s=p.read_text(encoding='utf-8'); s=s.replace('        logger = request.app.state.runtime_log\n','        runtime_log = request.app.state.runtime_log\n').replace('            logger.info("HTTP", f"{request.method} {request.url.path} 开始")','            runtime_log.info("HTTP", f"{request.method} {request.url.path} 开始")').replace('                logger.info("HTTP", f"{request.method} {request.url.path} -> {response.status_code}")','                runtime_log.info("HTTP", f"{request.method} {request.url.path} -> {response.status_code}")').replace('            logger.exception("HTTP", f"{request.method} {request.url.path} 未处理异常", error)','            runtime_log.exception("HTTP", f"{request.method} {request.url.path} 未处理异常", error)'); p.write_text(s, encoding='utf-8', newline='\n')
+          rw('src/fund_platform/model/calibration.py','from dataclasses import dataclass, replace\nimport math\n','import math\nfrom dataclasses import dataclass, replace\n')
+          p=root/'src/fund_platform/model/ensemble.py'; s=p.read_text(encoding='utf-8').replace('import math\n','').replace('from fund_platform.model.calibration import DEFAULTS, score_profile, select_profile','from fund_platform.model.calibration import score_profile, select_profile'); p.write_text(s, encoding='utf-8', newline='\n')
+          p=root/'tests/unit/test_daily_refresh.py'; s=p.read_text(encoding='utf-8').replace('    from datetime import date, timedelta\n    from fund_platform.data.nav_provider import NavPoint\n','    from datetime import timedelta\n\n    from fund_platform.data.nav_provider import NavPoint\n').replace('NavPoint(date.today() - timedelta(days=119-index), 1 + index * 0.001,','NavPoint(datetime.now(UTC).date() - timedelta(days=119-index), 1 + index * 0.001,'); p.write_text(s, encoding='utf-8', newline='\n')
+          rw('tests/unit/test_database_connections.py', "    with pytest.raises(RuntimeError, match='force rollback'):\n        with database.connect() as active:\n            connection = active\n            active.execute(\n                \"INSERT INTO search_history(token, used_at) VALUES (?, ?)\",\n                ('temporary', '2026-09-17T00:00:00+00:00'),\n            )\n            raise RuntimeError('force rollback')\n", "    with pytest.raises(RuntimeError, match='force rollback'), database.connect() as active:\n        connection = active\n        active.execute(\n            \"INSERT INTO search_history(token, used_at) VALUES (?, ?)\",\n            ('temporary', '2026-09-17T00:00:00+00:00'),\n        )\n        raise RuntimeError('force rollback')\n")
+          p=root/'tests/unit/test_launcher_self_test.py'; s=p.read_text(encoding='utf-8').replace('import fund_platform.launcher as launcher','from fund_platform import launcher').replace(".encode('utf-8')",'.encode()'); p.write_text(s, encoding='utf-8', newline='\n')
+          p=root/'tests/unit/test_runtime_log.py'; s=p.read_text(encoding='utf-8').replace('    log = RuntimeLog(path, reset=True)','    runtime_log = RuntimeLog(path, reset=True)').replace('in log.read_text()','in runtime_log.read_text()').replace('    log = RuntimeLog(tmp_path / "runtime.log", reset=True)','    runtime_log = RuntimeLog(tmp_path / "runtime.log", reset=True)').replace('    log.info("TEST", "before-clear")','    runtime_log.info("TEST", "before-clear")').replace('in log.read_text()','in runtime_log.read_text()').replace('    log.clear()','    runtime_log.clear()').replace('    text = log.read_text()','    text = runtime_log.read_text()').replace('        runtime_log=log,','        runtime_log=runtime_log,').replace('    log = RuntimeLog(sandbox_path / "runtime.log", reset=True)','    runtime_log = RuntimeLog(sandbox_path / "runtime.log", reset=True)').replace('client = TestClient(create_app(sandbox_path / "runtime.db", seed_demo=True, runtime_log=log))','client = TestClient(\n        create_app(sandbox_path / "runtime.db", seed_demo=True, runtime_log=runtime_log)\n    )').replace('    before = log.read_text()','    before = runtime_log.read_text()').replace('    added = log.read_text()[len(before):]','    added = runtime_log.read_text()[len(before):]'); p.write_text(s, encoding='utf-8', newline='\n')
+          import hashlib
+          expected={
+            'src/fund_platform/api/routes_core.py':'d4bcaaf303d1cf0d01fe26e93f07f697359e93634375b8b3e7e4c16f14c3d770',
+            'src/fund_platform/logging_runtime.py':'a3d82a938dbd3cc518fbec5bcc331442dc6bf5268bcda726cd270fdc76b2abb3',
+            'src/fund_platform/main.py':'b60efe5ed7a43af62834af6740ad16b3170b215b2f324d602ebd2fea38b8f0a3',
+            'src/fund_platform/model/calibration.py':'ef5e0b191d1a35ffd0fa243895e27ca5c654751967b79bcaf770c4bc03b82574',
+            'src/fund_platform/model/ensemble.py':'aca8b94541f6ec72e92754035f35c8f4a582c8f2f36a66c6fd23b0e8cbe19136',
+            'tests/unit/test_daily_refresh.py':'ad1c61d85bb11bb5ce2dd65a77c41b8ea20db340f473ee4711dfd7a61f167320',
+            'tests/unit/test_database_connections.py':'af574a28850e26c80c43dcbb2fc283701cd3c9c62357184fd666c1716019dbce',
+            'tests/unit/test_launcher_self_test.py':'d53a775a288799fea660f057b3a28f8da2f5173631a653ad887f57b1f7ac7774',
+            'tests/unit/test_runtime_log.py':'bb338a579ca4afe7a327421714ef6d9e285478e00ae858e499355279f54de273',
+          }
+          for name,want in expected.items():
+              got=hashlib.sha256((root/name).read_bytes()).hexdigest()
+              if got != want: raise SystemExit(f'hash mismatch {name}: {got}')
+          '@ | python -
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run full Windows Python suite
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: python -m pytest -q
+
+      - name: Run prediction-save regression suite
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: python -m pytest -q tests/e2e/test_prediction_records.py tests/unit/test_runtime_log.py
+
+      - name: Run Ruff
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: python -m ruff check src tests
+
+      - name: Run frontend suite
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: node --test tests/frontend/*.test.mjs
+
+      - name: Run syntax checks
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          python -m compileall -q src tests
+          node --check src/fund_platform/static/app.js
+          node --check src/fund_platform/static/api.js
+          node --check src/fund_platform/static/chart.js
+
+      - name: Build PyInstaller payload
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: pyinstaller --noconfirm --clean FundForecastApp.spec
+
+      - name: Build v1.3.3 installer
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: .\packaging\build-installer.ps1 -OutputDirectory .\release
+
+      - name: Download tested v1.3.2 installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'fund-v133-final3-builder' }
+          $zip = Join-Path $env:RUNNER_TEMP 'v132.zip'
+          $oldDir = Join-Path $env:RUNNER_TEMP 'v132'
+          Invoke-WebRequest -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:OLD_ARTIFACT_ID/zip" -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $oldDir -Force
+          $oldInstaller = Get-ChildItem $oldDir -Recurse -Filter '*.exe' | Select-Object -First 1
+          if (-not $oldInstaller) { throw 'v1.3.2 installer missing' }
+          "OLD_INSTALLER=$($oldInstaller.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate v1.3.2 to v1.3.3 upgrade
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          $newInstaller = Get-ChildItem .\release\*.exe | Select-Object -First 1
+          .\packaging\test-upgrade-installed.ps1 -OldInstallerPath $env:OLD_INSTALLER -NewInstallerPath $newInstaller.FullName
+
+      - name: Validate clean install self-test and uninstall
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          $installer = Get-ChildItem .\release\*.exe | Select-Object -First 1
+          .\packaging\test-installed.ps1 -InstallerPath $installer.FullName
+
+      - name: Write validation markers
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          $installer = Get-ChildItem .\release\*.exe | Select-Object -First 1
+          $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content .\release\SHA256SUMS.txt -Encoding ASCII
+          @('WINDOWS_FULL_SUITE_OK','PREDICTION_SAVE_REGRESSION_OK','RUFF_OK','FRONTEND_OK','WINDOWS_UPGRADE_SMOKE_OK','WINDOWS_INSTALL_SMOKE_OK',"installer_sha256=$hash") | Set-Content .\release\VALIDATION.txt -Encoding UTF8
+
+      - name: Upload tested v1.3.3 installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FundForecast-v1.3.3-Windows-tested-final3
+          path: |
+            ${{ env.FUND_SOURCE_DIR }}\release\*.exe
+            ${{ env.FUND_SOURCE_DIR }}\release\SHA256SUMS.txt
+            ${{ env.FUND_SOURCE_DIR }}\release\VALIDATION.txt
+          if-no-files-found: error
+          retention-days: 1
