@@ -107,6 +107,34 @@ jobs:
           if (-not (Test-Path (Join-Path $sourceDir 'pyproject.toml'))) { throw 'Decrypted source is incomplete' }
           "FUND_SOURCE_DIR=$sourceDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Restore Windows runtime probe omitted from minimized transport payload
+        shell: pwsh
+        run: |
+          @'
+          function Test-WebView2Runtime {
+              param(
+                  [string[]]$RegistryPaths = @(
+                      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+                      'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+                      'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+                  )
+              )
+
+              foreach ($registryPath in $RegistryPaths) {
+                  try {
+                      $runtimeVersion = Get-ItemPropertyValue -LiteralPath $registryPath -Name 'pv' -ErrorAction Stop
+                      if ($runtimeVersion -and ([version]$runtimeVersion -gt [version]'0.0.0.0')) {
+                          return $true
+                      }
+                  }
+                  catch {
+                      continue
+                  }
+              }
+              return $false
+          }
+          '@ | Set-Content -LiteralPath "$env:FUND_SOURCE_DIR\packaging\check-runtime.ps1" -Encoding UTF8
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
