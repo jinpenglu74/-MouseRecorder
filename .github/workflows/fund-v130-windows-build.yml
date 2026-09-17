@@ -104,6 +104,48 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Apply v1.3.2 isolated shortcut collision fix
+        shell: pwsh
+        working-directory: ${{ env.FUND_SOURCE_DIR }}
+        run: |
+          @'
+          from pathlib import Path
+          path = Path("packaging/install.ps1")
+          text = path.read_text(encoding="utf-8")
+          old = '''    $desktopLink = $shell.CreateShortcut((Join-Path $desktop "基金预测.lnk"))
+              $desktopLink.TargetPath = $exe
+              $desktopLink.WorkingDirectory = $installDir
+              $desktopLink.Description = "基金预测"
+              $desktopLink.Save()
+
+              $startLink = $shell.CreateShortcut((Join-Path $programs "基金预测.lnk"))
+              $startLink.TargetPath = $exe
+              $startLink.WorkingDirectory = $installDir
+              $startLink.Description = "基金预测"
+              $startLink.Save()
+          '''
+          new = '''    $desktopLinkPath = Join-Path $desktop "基金预测.lnk"
+              $startLinkPath = Join-Path $programs "基金预测.lnk"
+
+              $desktopLink = $shell.CreateShortcut($desktopLinkPath)
+              $desktopLink.TargetPath = $exe
+              $desktopLink.WorkingDirectory = $installDir
+              $desktopLink.Description = "基金预测"
+              $desktopLink.Save()
+
+              if ($startLinkPath -ne $desktopLinkPath) {
+                  $startLink = $shell.CreateShortcut($startLinkPath)
+                  $startLink.TargetPath = $exe
+                  $startLink.WorkingDirectory = $installDir
+                  $startLink.Description = "基金预测"
+                  $startLink.Save()
+              }
+          '''
+          if old not in text:
+              raise SystemExit("isolated shortcut patch target not found")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          '@ | python -
+
       - name: Install project and build dependencies
         shell: pwsh
         working-directory: ${{ env.FUND_SOURCE_DIR }}
